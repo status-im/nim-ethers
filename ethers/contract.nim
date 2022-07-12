@@ -16,6 +16,11 @@ type
     provider: Provider
     signer: ?Signer
     address: Address
+  TransactionOverrides* = object
+    nonce*: ?UInt256
+    gasPrice*: ?UInt256
+    gasLimit*: ?UInt256
+
   ContractError* = object of EthersError
   Confirmable* = ?TransactionResponse
   EventHandler*[E: Event] = proc(event: E) {.gcsafe, upraises:[].}
@@ -47,10 +52,17 @@ template raiseContractError(message: string) =
 
 proc createTransaction(contract: Contract,
                        function: string,
-                       parameters: tuple): Transaction =
+                       parameters: tuple,
+                       overrides = TransactionOverrides.default): Transaction =
   let selector = selector(function, typeof parameters).toArray
   let data = @selector & AbiEncoder.encode(parameters)
-  Transaction(to: contract.address, data: data)
+  Transaction(
+    to: contract.address,
+    data: data,
+    gasPrice: overrides.gasPrice,
+    gasLimit: overrides.gasLimit,
+    nonce: overrides.nonce
+  )
 
 proc decodeResponse(T: type, multiple: static bool, bytes: seq[byte]): T =
   when multiple:
@@ -77,11 +89,13 @@ proc call(contract: Contract,
   let response = await contract.provider.call(transaction, blockTag)
   return decodeResponse(ReturnType, returnMultiple, response)
 
-proc send(contract: Contract, function: string, parameters: tuple):
-    Future[?TransactionResponse] {.async.} =
-
+proc send(contract: Contract,
+          function: string,
+          parameters: tuple,
+          overrides = TransactionOverrides.default):
+         Future[?TransactionResponse] {.async.} =
   if signer =? contract.signer:
-    let transaction = createTransaction(contract, function, parameters)
+    let transaction = createTransaction(contract, function, parameters, overrides)
     let populated = await signer.populateTransaction(transaction)
     let txResp = await signer.sendTransaction(populated)
     return txResp.some
@@ -111,12 +125,23 @@ func isMultipleReturn(returnType: NimNode): bool =
   (returnType.kind == nnkTupleConstr) or
   (returnType.kind == nnkTupleTy)
 
+func addOverrides(procedure: var NimNode) =
+  procedure[3].add(
+    newIdentDefs(
+      ident("overrides"),
+      newEmptyNode(),
+      quote do: TransactionOverrides.default
+    )
+  )
+
 func addContractCall(procedure: var NimNode) =
   let contract = procedure[3][1][0]
   let function = $basename(procedure[0])
   let parameters = getParameterTuple(procedure)
   let returnType = procedure[3][0]
   let returnMultiple = returnType.isMultipleReturn.newLit
+
+  procedure.addOverrides()
 
   func call: NimNode =
     if returnType.kind == nnkEmpty:
@@ -130,12 +155,12 @@ func addContractCall(procedure: var NimNode) =
   func send: NimNode =
     if returnType.kind == nnkEmpty:
       quote:
-        discard await send(`contract`, `function`, `parameters`)
+        discard await send(`contract`, `function`, `parameters`, overrides)
     else:
       quote:
         when typeof(result) isnot Confirmable:
           {.error: "unexpected return type, missing {.view.} or {.pure.} ?".}
-        return await send(`contract`, `function`, `parameters`)
+        return await send(`contract`, `function`, `parameters`, overrides)
 
   procedure[6] =
     if procedure.isConstant:
