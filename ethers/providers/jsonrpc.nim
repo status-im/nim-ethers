@@ -159,7 +159,12 @@ proc subscribe(provider: JsonRpcProvider,
     let client = await provider.client
     doAssert client of RpcWebSocketClient, "subscriptions require websockets"
 
-    let id = await client.eth_subscribe(name, filter)
+    var id: JsonNode
+    if filter =? filter:
+      id = await client.eth_subscribe(name, filter)
+    else:
+      id = await client.eth_subscribe(name)
+
     provider.subscriptions[id] = handler
 
     return JsonRpcSubscription(id: id, provider: provider)
